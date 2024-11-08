@@ -416,30 +416,32 @@ func (m model) View() string {
     
     var slots string
     for i := m.viewport.top; i <= m.viewport.bottom; i++ {
-        slot := m.timeSlots[i]
-        timeStr := formatTimeSlot(slot)
-        
-        var slotStyle lipgloss.Style
+        if i < len(m.timeSlots){
+            slot := m.timeSlots[i]
+            timeStr := formatTimeSlot(slot)
+            
+            var slotStyle lipgloss.Style
 
-        switch {
-        case i == m.cursor:
-            slotStyle = selectedTimeSlotStyle
-        case i == m.currentTimeSlot && m.currentDate.Format("2006-01-02") == time.Now().Format("2006-01-02"):
-            slotStyle = currentTimeSlotStyle
-        default:
-            slotStyle = timeSlotStyle
-        }
-        
-        slots += slotStyle.Render(timeStr)
-        
-        for _, task := range slot.Tasks {
-            taskStr := fmt.Sprintf(" • %s (%dm)", task.Title, task.Duration)
-            if task.Done {
-                taskStr = fmt.Sprintf(" ✓ %s", task.Title)
+            switch {
+            case i == m.cursor:
+                slotStyle = selectedTimeSlotStyle
+            case i == m.currentTimeSlot && m.currentDate.Format("2006-01-02") == time.Now().Format("2006-01-02"):
+                slotStyle = currentTimeSlotStyle
+            default:
+                slotStyle = timeSlotStyle
             }
-            slots += taskStyle.Render(taskStr)
+            
+            slots += slotStyle.Render(timeStr)
+            
+            for _, task := range slot.Tasks {
+                taskStr := fmt.Sprintf(" • %s (%dm)", task.Title, task.Duration)
+                if task.Done {
+                    taskStr = fmt.Sprintf(" ✓ %s", task.Title)
+                }
+                slots += taskStyle.Render(taskStr)
+            }
+            slots += "\n"
         }
-        slots += "\n"
     }
     
     var form string
