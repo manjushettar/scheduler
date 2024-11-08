@@ -1,6 +1,7 @@
 package main
 
 import (
+    "scheduler/db"
     "fmt"
     "os"
     "time"
@@ -11,19 +12,18 @@ import (
     "github.com/charmbracelet/lipgloss"
     
     "log"
-    "scheduler/db"
 )
 
 var (
     appStyle = lipgloss.NewStyle().
         Padding(1, 2).
         Border(lipgloss.RoundedBorder()).
-        BorderForeground(lipgloss.Color("63")).
+        BorderForeground(lipgloss.Color("39")).
         Width(50)
     
     headerStyle = lipgloss.NewStyle().
         Bold(true).
-        Foreground(lipgloss.Color("86")).
+        Foreground(lipgloss.Color("219")).
         MarginBottom(1)
     
     timeSlotStyle = lipgloss.NewStyle().
@@ -37,8 +37,7 @@ var (
         PaddingLeft(1).
         PaddingRight(1).
         Border(lipgloss.NormalBorder()).
-        BorderForeground(lipgloss.Color("63")).
-        Background(lipgloss.Color("63")).
+        BorderForeground(lipgloss.Color("218")).
         Foreground(lipgloss.Color("255")).
         Width(44)
     
@@ -46,14 +45,22 @@ var (
         PaddingLeft(1).
         PaddingRight(1).
         Border(lipgloss.NormalBorder()).
-        BorderForeground(lipgloss.Color("205")).
-        Background(lipgloss.Color("52")).       
-        Foreground(lipgloss.Color("255"))
+        BorderForeground(lipgloss.Color("39"))
 
     taskStyle = lipgloss.NewStyle().
         PaddingLeft(1).
+        Foreground(lipgloss.Color("219"))
+    
+    normalTaskStyle = lipgloss.NewStyle().
+        PaddingLeft(1).
         Foreground(lipgloss.Color("86"))
     
+    selectedTaskStyle = lipgloss.NewStyle().
+        PaddingLeft(1).
+        Bold(true).
+        Foreground(lipgloss.Color("0")).
+        Foreground(lipgloss.Color("86"))
+
     formStyle = lipgloss.NewStyle().
         Border(lipgloss.RoundedBorder()).
         BorderForeground(lipgloss.Color("63")).
@@ -63,6 +70,8 @@ var (
 )
 
 type tickMsg time.Time
+
+const ID = 1
 
 func doTick() tea.Msg {
     return tickMsg(time.Now())
@@ -78,6 +87,7 @@ type Task struct {
     Duration int 
     Title    string
     Done     bool
+    ID       int64
 }
 
 type mode int
@@ -85,6 +95,7 @@ type mode int
 const (
     normalMode mode = iota
     taskCreationMode
+    taskSelectionMode
 )
 
 type model struct {
@@ -94,11 +105,13 @@ type model struct {
     timeSlots   []TimeSlot
     cursor      int
     selected    int
+    taskCursor int
     viewport    viewport
     mode        mode
     taskForm    taskForm
     errorMsg    string
     errorTimer  time.Time
+    deletePending bool
 }
 
 type taskForm struct {
@@ -119,6 +132,12 @@ func timeToSlotIndex(t time.Time) int {
     return minutes / 30
 }
 
+func (m model) currentTaskCount () int {
+    if m.cursor >= 0 && m.cursor < len(m.timeSlots){
+        return len(m.timeSlots[m.cursor].Tasks)
+    }
+    return 0
+}
 
 func generateTimeSlots(date time.Time) []TimeSlot {
     slots := make([]TimeSlot, 48)
@@ -176,6 +195,8 @@ func initialModel() model {
             bottom: currentTime + 2,
             height: 6,
         },
+        taskCursor: 0,
+        deletePending: false,
         mode:     normalMode,
         taskForm: initialTaskForm(),
     }
@@ -231,6 +252,7 @@ func (m *model) loadTasks() error {
                     Duration: task.Duration,
                     Title:    task.Title,
                     Done:     task.Done,
+                    ID:       task.ID,
                 },
             )
         }
@@ -275,6 +297,7 @@ func formatTimeSlot(slot TimeSlot) string {
     return fmt.Sprintf("%s - %s", startTime, endTime)
 }
 
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     var cmd tea.Cmd
     var cmds []tea.Cmd
@@ -284,28 +307,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         switch m.mode {
         case normalMode:
             switch msg.String() {
-            case "T":
-                now := time.Now()
-                m.currentDate = now
-                m.currentTimeSlot = timeToSlotIndex(now)
-                m.cursor = m.currentTimeSlot
-                m.timeSlots = generateTimeSlots(m.currentDate)
-                m.viewport.top = m.currentTimeSlot - 3
-                m.viewport.bottom = m.currentTimeSlot + 2
-
-                if m.viewport.top < 0 {
-                    m.viewport.top = 0
-                    m.viewport.bottom = 5
-                }
-                if m.viewport.bottom >= len(m.timeSlots) {
-                    m.viewport.bottom = len(m.timeSlots) - 1
-                    m.viewport.top = m.viewport.bottom - 5
-                }
-
-                if err := m.loadTasks(); err != nil {
-                    m.errorMsg = fmt.Sprintf("Failed to load tasks: %v", err)
-                    m.errorTimer = time.Now()
-                }
             case "ctrl+c", "q":
                 return m, tea.Quit
             case "left":
@@ -314,7 +315,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 if err := m.loadTasks(); err != nil {
                     m.errorMsg = fmt.Sprintf("Failed to load tasks: %v", err)
                     m.errorTimer = time.Now()
-                } 
+                }
             case "right":
                 m.currentDate = m.currentDate.AddDate(0, 0, 1)
                 m.timeSlots = generateTimeSlots(m.currentDate)
@@ -332,12 +333,84 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                     m.cursor++
                     m.updateViewport()
                 }
-            case "enter":
+            case "n":
                 m.selected = m.cursor
                 m.mode = taskCreationMode
                 m.taskForm = initialTaskForm()
-                
                 return m, textinput.Blink
+            case "enter":
+                if len(m.timeSlots[m.cursor].Tasks) > 0 {
+                    m.mode = taskSelectionMode
+                    m.taskCursor = 0
+                }
+            case "t", "T":
+                now := time.Now()
+                m.currentDate = now
+                m.currentTimeSlot = timeToSlotIndex(now)
+                m.cursor = m.currentTimeSlot
+                m.timeSlots = generateTimeSlots(m.currentDate)
+                
+                m.viewport.top = m.currentTimeSlot - 3
+                m.viewport.bottom = m.currentTimeSlot + 2
+                
+                if m.viewport.top < 0 {
+                    m.viewport.top = 0
+                    m.viewport.bottom = 5
+                }
+                if m.viewport.bottom >= len(m.timeSlots) {
+                    m.viewport.bottom = len(m.timeSlots) - 1
+                    m.viewport.top = m.viewport.bottom - 5
+                }
+                
+                if err := m.loadTasks(); err != nil {
+                    m.errorMsg = fmt.Sprintf("Failed to load tasks: %v", err)
+                    m.errorTimer = time.Now()
+                }
+            }
+        
+        case taskSelectionMode:
+            switch msg.String() {
+            case "esc":
+                m.mode = normalMode
+                m.taskCursor = 0
+                m.deletePending = false
+            case "up":
+                if m.taskCursor > 0 {
+                    m.taskCursor--
+                }
+            case "down":
+                if m.taskCursor < len(m.timeSlots[m.cursor].Tasks)-1 {
+                    m.taskCursor++
+                }
+            case "d":
+                if !m.deletePending{
+                    m.deletePending = true
+                    return m, nil
+                }
+                if m.deletePending {
+                    tasks := m.timeSlots[m.cursor].Tasks
+                    if len(tasks) > 0 && m.taskCursor < len(tasks) {
+                        taskID := tasks[m.taskCursor].ID
+                        if err := m.db.DeleteTask(taskID); err != nil {
+                            m.errorMsg = fmt.Sprintf("Failed to delete task: %v", err)
+                            m.errorTimer = time.Now()
+                        } else {
+                            m.timeSlots[m.cursor].Tasks = append(
+                                tasks[:m.taskCursor],
+                                tasks[m.taskCursor+1:]...
+                            )
+                            
+                            if len(m.timeSlots[m.cursor].Tasks) == 0 {
+                                m.mode = normalMode
+                            } else if m.taskCursor >= len(m.timeSlots[m.cursor].Tasks) {
+                                m.taskCursor = len(m.timeSlots[m.cursor].Tasks) - 1
+                            }
+                        }
+                    }
+                    m.deletePending = false
+                } 
+            default:
+                m.deletePending = false
             }
         
         case taskCreationMode:
@@ -390,7 +463,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 m.mode = normalMode
                 m.taskForm = initialTaskForm()
                 return m, nil
-
             }
             
             if m.taskForm.activeInput == 0 {
@@ -401,49 +473,65 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 cmds = append(cmds, cmd)
             }
         }
-        case tickMsg:
-                newTimeSlot := timeToSlotIndex(time.Now())
-                if newTimeSlot != m.currentTimeSlot {
-                    m.currentTimeSlot = newTimeSlot
-                    return m, nil
-                }
+    
+    case tickMsg:
+        newTimeSlot := timeToSlotIndex(time.Time(msg))
+        if newTimeSlot != m.currentTimeSlot {
+            m.currentTimeSlot = newTimeSlot
+            return m, nil
+        }
     }
+
     return m, tea.Batch(cmds...)
 }
 
 func (m model) View() string {
+    // Header with current date
     header := headerStyle.Render(fmt.Sprintf("📅 %s", m.currentDate.Format("Monday, January 2, 2006")))
     
+    // Time slots view
     var slots string
     for i := m.viewport.top; i <= m.viewport.bottom; i++ {
-        if i < len(m.timeSlots){
-            slot := m.timeSlots[i]
-            timeStr := formatTimeSlot(slot)
-            
-            var slotStyle lipgloss.Style
-
-            switch {
-            case i == m.cursor:
-                slotStyle = selectedTimeSlotStyle
-            case i == m.currentTimeSlot && m.currentDate.Format("2006-01-02") == time.Now().Format("2006-01-02"):
-                slotStyle = currentTimeSlotStyle
-            default:
-                slotStyle = timeSlotStyle
-            }
-            
-            slots += slotStyle.Render(timeStr)
-            
-            for _, task := range slot.Tasks {
+        slot := m.timeSlots[i]
+        timeStr := formatTimeSlot(slot)
+        
+        // Determine time slot style
+        var style lipgloss.Style
+        switch {
+        case i == m.cursor && i == m.currentTimeSlot && m.currentDate.Format("2006-01-02") == time.Now().Format("2006-01-02"):
+            style = selectedTimeSlotStyle.Copy().Background(lipgloss.Color("52"))
+        case i == m.cursor:
+            style = selectedTimeSlotStyle
+        case i == m.currentTimeSlot && m.currentDate.Format("2006-01-02") == time.Now().Format("2006-01-02"):
+            style = currentTimeSlotStyle
+        default:
+            style = timeSlotStyle
+        }
+        
+        slots += style.Render(timeStr) + "\n"
+        
+        // Show tasks for this time slot
+        if len(slot.Tasks) > 0 {
+            for taskIndex, task := range slot.Tasks {
+                var taskStyle lipgloss.Style
+                
+                // Apply selected task style in task selection mode
+                if i == m.cursor && m.mode == taskSelectionMode && taskIndex == m.taskCursor {
+                    taskStyle = selectedTaskStyle
+                } else {
+                    taskStyle = normalTaskStyle
+                }
+                
                 taskStr := fmt.Sprintf(" • %s (%dm)", task.Title, task.Duration)
                 if task.Done {
                     taskStr = fmt.Sprintf(" ✓ %s", task.Title)
                 }
-                slots += taskStyle.Render(taskStr)
+                slots += taskStyle.Render(taskStr) + "\n"
             }
-            slots += "\n"
         }
     }
     
+    // Task creation form
     var form string
     if m.mode == taskCreationMode {
         form = formStyle.Render(fmt.Sprintf(
@@ -455,21 +543,28 @@ func (m model) View() string {
         ))
     }
     
-    help := ""
-    if m.mode == normalMode {
-        help = "\nNavigate: ↑/↓ • Change Day: ←/→ • New Task: Enter • Current Time: T • Quit: q"
+    // Help text
+    var help string
+    switch m.mode {
+    case normalMode:
+        help = "\nNavigate: ↑/↓ • Change Day: ←/→ • New Task: n • Enter Time Slot: Enter • Current Time: T • Quit: q"
+    case taskSelectionMode:
+        help = "\nNavigate Tasks: ↑/↓ • Delete: dd • Exit Selection: Esc"
+    case taskCreationMode:
+        help = "\nTab: Switch fields • Enter: Save • Esc: Cancel"
     }
-        
+    
+    // Error message
+    var errorDisplay string
     if m.errorMsg != "" && time.Since(m.errorTimer) < 3*time.Second {
         errorStyle := lipgloss.NewStyle().
-            Foreground(lipgloss.Color("red")).
+            Foreground(lipgloss.Color("196")).
             Margin(1)
-        slots += errorStyle.Render(m.errorMsg)
+        errorDisplay = errorStyle.Render(m.errorMsg)
     }
-
-    return appStyle.Render(header + "\n" + slots + form + help)
+    
+    return appStyle.Render(header + "\n" + slots + errorDisplay + form + help)
 }
-
 func main() {
     p := tea.NewProgram(initialModel(), tea.WithAltScreen())
     go func() {
